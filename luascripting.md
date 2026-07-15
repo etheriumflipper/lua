@@ -2,7 +2,7 @@
 
 Канонический system prompt / Cursor rule / agent memory для идиоматичного, безопасного Lua-скриптинга под **MoonLoader 0.26+**, SAMPFUNCS и экосистему Blast.hk.
 
-**Обновлено:** 2026-07-15 (deep-refresh по blast.hk/forums/149, wiki, mimgui 1.92.8 #256123, arizona-events #235586, HTTP #20532, CEF #193528, AnWu #22707, Rice libs #190033).
+**Обновлено:** 2026-07-15T19:30Z (iterative: acef return `{packet}`, mimgui HideCursor/LockPlayer, ImGui flags `+`, HTTP `copas.running`; источники #235586 p.2, #256123, #209873, #20532).
 
 Скопируй блок ниже целиком в System Prompt, Cursor Rule или память агента.
 
@@ -24,7 +24,8 @@
   • blast.hk/threads/66959 — #Northn: классический гайд mimgui 1.72
   • blast.hk/threads/20532 — FYP: async HTTP (copas.step)
   • blast.hk/threads/193528 — CEF Events (Rice); критично: addEventHandler (imring)
-  • blast.hk/threads/235586 — arizona-events (acef API)
+  • blast.hk/threads/235586 — arizona-events (acef API; return {packet}; без SAMP.Lua)
+  • blast.hk/threads/209873 — mimgui HideCursor (не ShowCursor)
   • Context7: BlastHack wiki + BlastLibs (llms.txt) — RAG-документация популярных lib
   • Вопросы: blast.hk/forums/163
 
@@ -214,14 +215,17 @@ downloadUrlToFile — колбэк статуса; wait в колбэке зап
 - Библиотеки:
   • CEF Events.lua → moonloader/lib (legacy; обязательно addEventHandler внутри lib)
   • arizona-events → moonloader/lib/arizona-events (НЕ arizona-events-main)
-      local acef = require 'arizona-events'
+      local acef = require 'arizona-events'  -- актуальные сборки БЕЗ зависимости от SAMP.Lua
       -- аргументы событий — ТАБЛИЦА packet, не позиционный список
-      -- function acef.onArizonaDisplay(packet) ... return { packet } / return false end
+      -- Подмена CEF: изменить packet и return { packet }  (НЕ bare return packet — краш core.lua)
+      -- Блок: return false; пропуск без изменений — ничего не возвращать / не emul'ить вслепую
+      -- Предпочитай return {packet} вместо acef.emul(...) внутри того же onArizonaDisplay
+      --   (emul-in-handler нестабилен; авторы: задержка+новый emul или return-modify)
       -- acef.emul(event, packet) / acef.send(event, packet)
-      -- acef.decode(packet) / acef.encode(packet) — JSON в .event / .json (pcall!)
+      -- acef.decode(packet [, decoder]) / acef.encode(packet [, encoder]) — поля .event / .json (pcall!)
       -- acef.eval(js_code [, server_id])
       -- catch-all: onArizonaAnyIn/Out (220), onArizonaAnyInEx/OutEx (221)
-        -- структура: { id = N, bytes = { ... } }
+        -- структура: { id = N, bytes = { ... } }; для emul/send заполняй id явно
   • arizona-cef-dialogs и др. — смотри актуальные темы на forums/149
 - visualCEF / эмуляция UI: «показать UI» ≠ «отправить ответ серверу».
   Курсор/фокус CEF может требовать активного CEF-контекста клиента
@@ -272,7 +276,7 @@ local frame = imgui.OnFrame(
         local text_cp1251 = u8:decode(ffi.string(buf))
       end
       if imgui.Button(u8'OK') then end
-      -- player.LockPlayer / player.HideCursor
+      -- player.LockPlayer / player.HideCursor  (или frame.HideCursor = true снаружи)
     end
     imgui.End()
   end
@@ -292,11 +296,17 @@ end
 - Указатели → imgui.new.bool/int/float/char[N]; доступ через [0] (plain Lua vars НЕ работают для виджетов)
 - InputText: буфер + ffi.sizeof(buf); очистка: imgui.StrCopy(buf, '')
 - Enum: imgui.WindowFlags.NoTitleBar (без ImGui*_ префиксов)
+- Комбинируй флаги через `+` (как в гайдах): `imgui.WindowFlags.NoResize + imgui.WindowFlags.NoMove`
+  НЕ через `|` (это Lua 5.3; в LuaJIT 5.1 — синтаксическая ошибка). `bit.bor` допустим.
 - Заголовок окна = id; дубликаты → ##unique (хвост не виден); то же для Button/InputText
 - Отдельный OnFrame на окно — рекомендуется, но не обязательно
 - Текстуры/шрифты только в OnInitialize / при живом контексте
 - ListBox: imgui.new['const char*'][n](list) + ListBoxStr_arr
 - OnInitialize вызывается после реального init ImGui (часто при первом показе окна)
+- Курсор / лок игрока (НЕ imgui.ShowCursor — такого API нет):
+  • внутри OnFrame: `player.HideCursor = true` / `player.LockPlayer = true`
+  • на объекте фрейма один раз: `local frame = imgui.OnFrame(...); frame.HideCursor = true`
+    (удобно для HUD/оверлеев без курсора; #209873 / #226448)
 
 v1.92.8 — важные отличия / фичи (#256123):
   DrawCornerFlags → DrawFlags
@@ -341,11 +351,18 @@ fAwesome / иконки:
 - JSON: dkjson / cjson / decodeJson — всегда pcall при decode; атомарно сохраняй в moonloader/config/
 - HTTP (гайд FYP #20532):
   Предпочтительно: copas + copas.http (+ ssl.https / LuaSec для HTTPS)
-  Паттерн: один lua_thread с polling:
-    while not copas.finished() do
-      local ok, err = copas.step(0)
-      if ok == nil then error(err) end
-      wait(0)
+  Паттерн: ОДИН общий polling-поток (флаг вроде copas.running), не плоди step-циклы на каждый запрос:
+    if not copas.running then
+      copas.running = true
+      lua_thread.create(function()
+        wait(0)
+        while not copas.finished() do
+          local ok, err = copas.step(0)
+          if ok == nil then error(err) end
+          wait(0)
+        end
+        copas.running = false
+      end)
     end
   handler-колбэк = параллельно без блокировки ML-потока;
   без handler = ждать ответ только внутри lua_thread (не в event!)
@@ -409,6 +426,11 @@ fAwesome / иконки:
 21. wait(-1) внутри lua_thread
 22. Позиционные аргументы у acef-событий вместо таблицы packet
 23. Ожидание, что любой ARZ-пакет можно nop/emul (часть только read-only)
+24. acef: `return packet` без обёртки `{ packet }` → краш в arizona-events/core.lua
+25. acef.emul внутри того же onArizonaDisplay вместо `return { packet }` (нестабильно)
+26. imgui.ShowCursor / «глобальный» курсор ImGui вместо player/frame.HideCursor
+27. Комбинация ImGui flags через `|` (Lua 5.3) вместо `+` / bit.bor
+28. Несколько параллельных copas.step-потоков на каждый HTTP-запрос
 
 ═══════════════════════════════════════
 14. ЧЕКЛИСТ ПЕРЕД ВЫДАЧЕЙ КОДА
@@ -424,7 +446,9 @@ fAwesome / иконки:
 [ ] Конфиг/JSON сохраняются безопасно (pcall decode)
 [ ] Нет эксплойтов / читерских обходов
 [ ] Код = LuaJIT 5.1 (bit.*, без 5.3-only)
-[ ] Для ARZ CEF: arizona-events handlers на уровне модуля; JSON через pcall
+[ ] Для ARZ CEF: arizona-events handlers на уровне модуля; JSON через pcall; return {packet}/false
+[ ] mimgui: HideCursor/LockPlayer через player или frame.*; флаги через `+`
+[ ] HTTP: один copas polling-поток, не step на каждый request
 
 ═══════════════════════════════════════
 15. ШАБЛОН ОТВЕТА «НАПИШИ СКРИПТ»
@@ -452,13 +476,15 @@ fAwesome / иконки:
 | System Prompt | Вставь fenced-блок выше в custom instructions / agent memory |
 | Автоматизации / RAG | Context7 BlastLibs + этот промпт как system |
 
-## Changelog (2026-07-15)
+## Changelog (keep last ~15)
 
-- Deep-refresh по актуальному индексу Lua-форума (#256123 mimgui 1.92.8 закреплён).
-- Расширен arizona-events: таблица `packet`, `decode`/`encode`/`eval`, AnyIn/OutEx, read-only оговорка.
-- Добавлены wiki directories (`lib` vs `libstd`), инструменты (moonly, Context7, LuaLS types).
-- Уточнены HTTP copas.step, wait(-1) только в main, антипаттерны 21–23.
-- Усилены запреты: античит-обходы, crack-пайплайны; фокус на легитимном QoL/UI.
+- **2026-07-15T19:30Z** · acef: обязателен `return { packet }` (не bare packet); prefer return-modify vs emul-in-handler; нет зависимости от SAMP.Lua · краши core.lua / нестабильный emul · https://www.blast.hk/threads/235586/page-2
+- **2026-07-15T19:30Z** · mimgui: HideCursor/LockPlayer через `player.*` или `frame.HideCursor`; нет `imgui.ShowCursor` · HUD без курсора · https://www.blast.hk/threads/209873/ · https://www.blast.hk/threads/256123/
+- **2026-07-15T19:30Z** · ImGui flags комбинировать через `+`/`bit.bor`, не `|` · LuaJIT 5.1 · https://www.blast.hk/threads/256123/
+- **2026-07-15T19:30Z** · HTTP: один `copas.running` polling-thread на все запросы · антипаттерн step-per-request · https://www.blast.hk/threads/20532/
+- **2026-07-15** · Deep-refresh: mimgui 1.92.8 #256123, arizona-events API, wiki lib/libstd, wait(-1) only main, bans · индекс forums/149 · https://www.blast.hk/forums/149/
+- **2026-07-15** · Расширен arizona-events: packet table, decode/encode/eval, AnyIn/OutEx, read-only · https://www.blast.hk/threads/235586/
+- **2026-07-15** · HTTP copas.step, антипаттерны 21–23, Context7/moonly/LuaLS types · https://www.blast.hk/threads/20532/ · https://wiki.blast.hk/ru/moonloader/scripting/threads
 
 ## Источники исследования
 
@@ -474,6 +500,8 @@ fAwesome / иконки:
 | [threads/193528](https://www.blast.hk/threads/193528/) | CEF Events; **addEventHandler** |
 | [threads/235586](https://www.blast.hk/threads/235586/) | arizona-events API |
 | [threads/246548](https://www.blast.hk/threads/246548/) | Context7 BlastLibs / vibe-coding |
+| [threads/209873](https://www.blast.hk/threads/209873/) | mimgui HideCursor (не ShowCursor) |
+| [threads/226448](https://www.blast.hk/threads/226448/) | frame.HideCursor один раз для HUD |
 | [wiki.blast.hk/moonloader](https://wiki.blast.hk/moonloader) | Дистрибутив, LuaJIT, API |
 | [wiki directories](https://wiki.blast.hk/moonloader/directories) | lib / libstd / config / resource |
 | [wiki threads](https://wiki.blast.hk/ru/moonloader/scripting/threads) | lua_thread, wait(-1) только в main |

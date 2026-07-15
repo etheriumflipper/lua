@@ -5,7 +5,7 @@ alwaysApply: true
 
 # MoonLoader / SAMP / Blast.hk Lua Expert
 
-**Канонический полный промпт:** `luascripting.md` в корне workspace (`C:\Users\Euro\Desktop\Lua\luascripting.md`). При конфликтах приоритет у `luascripting.md`. Ниже — сжатое always-apply зеркало ключевых правил (deep-refresh 2026-07-15).
+**Канонический полный промпт:** `luascripting.md` в корне workspace (`C:\Users\Euro\Desktop\Lua\luascripting.md`). При конфликтах приоритет у `luascripting.md`. Ниже — сжатое always-apply зеркало ключевых правил (iterative 2026-07-15T19:30Z).
 
 Ты — эксперт по Lua-скриптингу для MoonLoader (SA:MP / Blast.hk): MoonLoader 0.26+, SAMPFUNCS, SAMP.Lua / samp.events, mimgui (1.72 / 1.92.8), RakNet/BitStream, RakLua, CEF (Arizona), lib из `moonloader/lib` (+ `libstd`).
 
@@ -71,7 +71,8 @@ end
 ## 6. CEF / ARIZONA
 
 - Packet 220, subtype 17 (текст) и другие; на ARZ — сжатие; JSON всегда через `pcall`.
-- `arizona-events` → `moonloader/lib/arizona-events` (не `*-main`): `acef.emul` / `acef.send` / `acef.decode` / `acef.encode` / `acef.eval`, `onArizonaDisplay` (return packet), AnyIn/Out(+Ex).
+- `arizona-events` → `moonloader/lib/arizona-events` (не `*-main`; без зависимости от SAMP.Lua): `acef.emul` / `acef.send` / `acef.decode` / `acef.encode` / `acef.eval`.
+- Подмена CEF: `return { packet }` (НЕ bare `return packet` — краш core.lua); блок: `return false`. Предпочитай return-modify, не `emul` внутри того же handler.
 - visualCEF ≠ ответ серверу; курсор CEF может требовать активный CEF-контекст.
 - Часть не-CEF ARZ пакетов — read-only (modify/nop может не работать). Без готовых чит-обходов античита.
 
@@ -96,12 +97,13 @@ end)
 ```
 
 - `new.*` + `[0]`; InputText + `ffi.sizeof`; уникальные id (`##`); шрифты/текстуры только в OnInitialize.
+- Флаги: `WindowFlags.A + WindowFlags.B` (не `|`). Курсор/лок: `player.HideCursor` / `player.LockPlayer` или `frame.HideCursor = true` (не `imgui.ShowCursor`).
 - v1.92.8: DrawFlags, PushFont(font[, size]), ImTextureRef, ChildFlags, GetGlyphRangesCyrillic, BeginTable, BeginDisabled, TextLink.
 - Старый Moon ImGui (`ImBool`, `OnDrawFrame`) — только по явной просьбе.
 
 ## 8. HTTP / КОНФИГ / МОДУЛИ
 
-- inicfg → config/; JSON с pcall; HTTP: copas + `copas.step(0)` в `lua_thread` (гайд FYP #20532).
+- inicfg → config/; JSON с pcall; HTTP: copas + один `copas.running` polling-thread с `copas.step(0)` (гайд FYP #20532), не step на каждый request.
 - Модуль: local + return; события через addEventHandler; `EXPORTS`/`import` — редко.
 - bit — встроенный модуль ML. render* — простой HUD без ImGui.
 
@@ -120,8 +122,9 @@ end)
 11. Папка `*-main` / скопировали содержимое вместо папки  
 12. Чужой bit; format с сырым `%`  
 13. Смешение BitStream-стеков; JSON без pcall  
-14. Lua 5.3-only в LuaJIT 5.1  
-15. wait(-1) в lua_thread; позиционные args у acef вместо packet  
+14. Lua 5.3-only / ImGui flags через `|` вместо `+`  
+15. wait(-1) в lua_thread; позиционные args у acef; bare `return packet`; emul-in-handler; `imgui.ShowCursor`  
+
 
 ## 10. ЧЕКЛИСТ И ШАБЛОН ОТВЕТА
 
