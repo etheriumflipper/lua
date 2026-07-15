@@ -2,7 +2,7 @@
 
 Канонический system prompt / Cursor rule / agent memory для идиоматичного, безопасного Lua-скриптинга под **MoonLoader 0.26+**, SAMPFUNCS и экосистему Blast.hk.
 
-**Обновлено:** 2026-07-15T23:15Z (gaps: pre-delivery, stack matrix, RakNet cookbook, file safety, perf, multi-script, reply RU, anti-drift; + prior §16–§22).
+**Обновлено:** 2026-07-15T23:44Z (§31 input/UI hijacking: T/chat, dialogs, cursor; + prior gaps §16–§30).
 
 Скопируй блок ниже целиком в System Prompt, Cursor Rule или память агента.
 
@@ -37,7 +37,7 @@
   §16 сервер · §17 отладка · §18 совместимость · §19 UI/UX · §20 lib 2026 ·
   §21 ❌/✅ · §22 необещания · §23 pre-delivery · §24 stack matrix ·
   §25 RakNet cookbook · §26 file safety · §27 perf · §28 multi-script ·
-  §29 reply RU · §30 anti-drift
+  §29 reply RU · §30 anti-drift · §31 input/UI hijacking (T/chat/dialogs)
 
 ═══════════════════════════════════════
 0. ЖЁСТКИЕ ЗАПРЕТЫ (NON-NEGOTIABLE)
@@ -487,6 +487,7 @@ fAwesome / иконки:
 32. inicfg.load без defaults и без проверки на nil; плоский ini без секций
 33. downloadUrlToFile: wait в callback / нет keep-alive / игнор download_status
 34. onScriptTerminate без `script == thisScript()` (чужие unload'ы) или без save/cleanup
+35. Input hijack: consume/VK_T всегда; HideCursor/LockPlayer навсегда; глобальный onShowDialog false — **§31**
 
 ═══════════════════════════════════════
 14. ЧЕКЛИСТ ПЕРЕД ВЫДАЧЕЙ КОДА
@@ -512,8 +513,9 @@ fAwesome / иконки:
 [ ] Сервер объявлен/спросили (§16); не смешаны ARZ CEF и generic/Rodina протоколы
 [ ] Совместимость: addEventHandler для пакетов; cleanup onScriptTerminate (§18)
 [ ] UI/UX: хоткеи через onWindowMessage; конфиг persist; не блокировать ввод навсегда (§19)
+[ ] Input hijack §31: consume/HideCursor/LockPlayer/dialogs только пока UI открыт; restore на close+terminate
 [ ] Pre-delivery §23; stack assumptions §24; file safety §26 при I/O; perf §27 если poll/UI
-[ ] При сомнении — необещания §22; при баге — чеклист §17
+[ ] При сомнении — необещания §22; при баге — чеклист §17 / §31
 [ ] Ответ: короткий RU UX (§29); не раздувай канон (§30)
 
 ═══════════════════════════════════════
@@ -634,6 +636,7 @@ fAwesome / иконки:
 - Не блокируй ввод навсегда жёстким блоком пакетов/CEF без восстановления.
 - Отдельный OnFrame на окно; HUD без курсора — frame.HideCursor; меню — HideCursor+LockPlayer
   только пока открыто.
+- Реальные баги «T не открывает чат / диалоги пропали / курсор залип» — подробно **§31**.
 
 ═══════════════════════════════════════
 20. КАТАЛОГ LIB 2026 (что брать сейчас)
@@ -852,6 +855,89 @@ SF.lua, MoonMonet, effil, rkeys, hooks.lua, arizona-cef-dialogs, HTTP_ASYNC.dll.
 - Не дублируй один совет в §14 / §17 / §23 / .mdc длинно: канон подробно,
   .mdc — зеркало-ссылки. При конфликте побеждает luascripting.md.
 - Новые темы: сначала улучши смежный §; новый § — только если тема не покрыта.
+
+═══════════════════════════════════════
+31. ПОЛОМКА ЧАТА (T), ДИАЛОГОВ И ВВОДА (input / UI hijacking)
+═══════════════════════════════════════
+Реальные баги от пользователей: после UI/CEF-слоёв иногда **не открывается чат на T**,
+**не видны / не кликаются диалоги**, **залипает курсор**, **«мёртвые» клавиши**.
+Сложно объяснить одной строкой — держи этот чеклист при любом GUI/CEF/хоткее.
+Источники: wiki onWindowMessage / consumeWindowMessage; mimgui #66959/#209873/#226448;
+samp.events return false (#14624, #181208, #192104); CEF #193528/#235586.
+
+### Симптомы (user-facing)
+- **T** (или ` / Ё) не открывает chat input; ввод «глохнет», хотя игра жива.
+- Нативные **диалоги** не появляются, мигают и сразу пропадают, или видны, но
+  не кликаются / под UI-оверлеем.
+- Курсор **залип** (всегда виден / всегда скрыт); WASD/камера странно ведут себя.
+- Клавиши «мёртвые» или хоткей скрипта срабатывает вместо чата/диалога.
+- Скрипт «думает», что меню открыто (`show[0]=true`), а на экране пусто → чат/ввод
+  всё равно перехвачены.
+
+### Root causes (агент обязан избегать)
+1. `consumeWindowMessage(...)` на **все** KEYDOWN/KEYUP, включая **VK_T** / chat key,
+   когда **твоё** UI уже закрыто (или gate забыт).
+2. `player.HideCursor` / `player.LockPlayer` / `frame.HideCursor` остались true после
+   закрытия окна; OnFrame condition всё ещё true → курсор/лок «вечные».
+3. CEF overlay / `acef.emul` / visualCEF-фокус оставлен активным; курсор CEF без
+   активного контекста или без restore при close.
+4. `return false` из `onShowDialog` / dialog RPC / packet handler — и **нет** пути
+   восстановления (флаг навсегда, глобальный блок всех диалогов).
+5. Глобальный блок ShowDialog / dialog packet «на всякий случай» без фильтра id/title.
+6. ImGui / старый `imgui.Process` / WantCaptureKeyboard без gating на **видимое** окно
+   (Process=true / frame всегда рисуется → клавиатура уходит в ImGui, не в SA:MP).
+7. Хоткей на **T** (toggle меню) + consume всегда → чат никогда не откроется.
+8. `sampSetCursorMode` выставлен и не сброшен (часто 2 → 0 при close); конфликт с
+   mimgui HideCursor / CEF курсором.
+9. Несколько скриптов дерутся за курсор (каждый кадр HideCursor true/false) —
+   #226448: выставляй `frame.HideCursor` **один раз** на объект фрейма, не в спаме.
+
+### Жёсткие правила
+- **Consume / suppress ключей — только пока YOUR UI реально открыто**
+  (`show[0]` / dialog flag / CEF focus). Иначе — early return, без consume.
+- Перед хоткеем: не сквозь `sampIsChatInputActive()` / `sampIsDialogActive()` /
+  `sampIsCursorActive()` (и CEF-курсор, если знаешь API сервера).
+- **Не бери T / ` / Ё под toggle**, если можно другую клавишу; если берёшь —
+  consume **только** когда меню открыто (закрытие) или когда явно перехватываешь
+  открытие; не глотай T «навсегда».
+- **Всегда restore** на close **и** в `onScriptTerminate`: `show[0]=false`,
+  `LockPlayer=false`, снять HideCursor-path / cursor mode, отключить frame condition,
+  не оставлять emul/CEF focus.
+- **Никогда** не блокируй диалоги перманентно, если фича этого не требует явно;
+  любой `return false` на ShowDialog — узкий фильтр + путь вернуть показ / response.
+- `consumeWindowMessage` ≠ `return false` пакетов (wiki: только внутри onWindowMessage;
+  args: game [, scripts]).
+- Старый Moon ImGui: не оставляй `imgui.Process = true` после закрытия.
+
+### ❌ / ✅
+❌  consumeWindowMessage на VK_T всегда (UI закрыто) → чат мёртв
+✅  if not show[0] then return end; consume только для ESC/хоткея своего меню;
+    T / ` / Ё не глотать «навсегда»; лучше другой хоткей для toggle
+
+❌  OnFrame(function() return true end) + LockPlayer/HideCursor всегда
+✅  OnFrame(function() return show[0] end, ...); на close и onScriptTerminate:
+    show[0]=false; снять lock/cursor mode/CEF focus
+
+❌  function sampev.onShowDialog(...) return false end  -- все диалоги
+✅  return false только при узком фильтре (id/title); иначе не блокируй;
+    чужие скрипты тоже страдают от глобального false (#181208)
+
+❌  imgui.Process = true / WantCaptureKeyboard без видимого окна
+✅  Process/capture только пока меню открыто; старый Moon ImGui — сбрасывай Process
+
+### Recovery tips (vibecoder / игрок)
+1. Выключи подозрительный скрипт (MoonLoader reload / удали .lua) — если T/диалоги
+   ожили, виноват он (или его leftover state до рестарта клиента).
+2. Проверь `onScriptTerminate`: без restore после ошибки/reload курсор и Process
+   могут остаться «как при открытом UI».
+3. Не оставляй `show[0]=true` / `imgui.Process=true` / вечный OnFrame condition.
+4. Ищи в коде: `consumeWindowMessage`, `VK_T`, `onShowDialog`+`return false`,
+   `LockPlayer`, `HideCursor`, `sampSetCursorMode`, CEF `emul`.
+5. Конфликт нескольких GUI: временно оставь один UI-скрипт; курсорные войны —
+   типичный симптом (#224512 / #226448).
+6. После фикса — полный reconnect / перезапуск игры, если курсор уже «залип» в клиенте.
+
+Связь: §19 (паттерны UI) · §18 (cleanup terminate) · §6 CEF · §21 ❌/✅ · §23 pre-delivery.
 ```
 
 ---
@@ -866,14 +952,8 @@ SF.lua, MoonMonet, effil, rkeys, hooks.lua, arizona-cef-dialogs, HTTP_ASYNC.dll.
 
 ## Changelog (keep last ~15)
 
-- **2026-07-15T23:15Z** · §23 Pre-delivery verification: agent checklist, log failure modes, in-game tests, no false confidence
-- **2026-07-15T23:15Z** · §24 Stack version matrix: ML 0.26+ / SF / 0.3.7 R* / LuaJIT 5.1; mix breaks; declare assumptions · wiki changelog
-- **2026-07-15T23:15Z** · §25 RakNet/RPC cookbook: short QoL patterns; BitStream bits; prefer samp.events; no exploit dumps · #14624/#158006
-- **2026-07-15T23:15Z** · §26 File safety: config-only writes, no `..`, download limits, no libstd overwrite, sanitize names
-- **2026-07-15T23:15Z** · §27 Performance: no heavy every-frame; chat poll intervals; batch; ImGui when visible
-- **2026-07-15T23:15Z** · §28 Multi-script: one vs lib+EXPORTS; unique commands; addEventHandler; collisions; versioning
-- **2026-07-15T23:15Z** · §29 Agent reply localization: short RU UX; API English; deps/paths/hotkeys; questions or defaults
-- **2026-07-15T23:15Z** · §30 Anti-drift: soft size budget; CHANGELOG ~15; patch > bloat; supersede obsolete; no dup sections
+- **2026-07-15T23:44Z** · §31 Input/UI hijacking: T/chat dead, dialogs hidden, cursor stuck; consume/HideCursor/LockPlayer/onShowDialog rules + ❌/✅ + recovery · wiki onWindowMessage/#209873/#181208
+- **2026-07-15T23:15Z** · §23–§30: pre-delivery, stack matrix, RakNet QoL, file safety, perf, multi-script, reply RU, anti-drift
 - **2026-07-15T23:00Z** · §16–§22: server matrix, debug, compatibility, UI/UX, lib 2026, ❌/✅, non-promises · forums/149 #190033 #193528
 - **2026-07-15T22:40Z** · script_properties, inicfg, download_status, BitStream reset*, samp.events, consumeWindowMessage · wiki + #14624/#158006
 - **2026-07-15T19:30Z** · acef `return { packet }`; HideCursor; ImGui flags `+`; copas.running · #235586/#209873/#256123/#20532
@@ -904,6 +984,9 @@ SF.lua, MoonMonet, effil, rkeys, hooks.lua, arizona-cef-dialogs, HTTP_ASYNC.dll.
 | [wiki downloadUrlToFile](https://wiki.blast.hk/moonloader/lua/downloadUrlToFile) | download_status, cancel |
 | [wiki onScriptTerminate](https://wiki.blast.hk/moonloader/lua/onScriptTerminate) | cleanup + quitGame |
 | [wiki onWindowMessage](https://wiki.blast.hk/moonloader/lua/onWindowMessage) | consumeWindowMessage |
+| [wiki consumeWindowMessage](https://wiki.blast.hk/moonloader/lua/consumeWindowMessage) | game/scripts ignore flags |
+| [threads/181208](https://www.blast.hk/threads/181208/) | onShowDialog return false vs other scripts |
+| [threads/224512](https://www.blast.hk/threads/224512/) | mimgui курсор / войны HideCursor |
 | [wiki.blast.hk/moonloader](https://wiki.blast.hk/moonloader) | Дистрибутив, LuaJIT, API |
 | [wiki directories](https://wiki.blast.hk/moonloader/directories) | lib / libstd / config / resource |
 | [wiki threads](https://wiki.blast.hk/ru/moonloader/scripting/threads) | lua_thread, wait(-1) только в main |
