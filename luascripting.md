@@ -2,7 +2,7 @@
 
 Канонический system prompt / Cursor rule / agent memory для идиоматичного, безопасного Lua-скриптинга под **MoonLoader 0.26+**, SAMPFUNCS и экосистему Blast.hk.
 
-**Обновлено:** 2026-07-15T19:30Z (iterative: acef return `{packet}`, mimgui HideCursor/LockPlayer, ImGui flags `+`, HTTP `copas.running`; источники #235586 p.2, #256123, #209873, #20532).
+**Обновлено:** 2026-07-15T22:40Z (iterative: script_properties, inicfg paths, download_status, BitStream reset*, samp.events return, consumeWindowMessage, onScriptTerminate; источники wiki + #14624, #158006, #69433, #89876).
 
 Скопируй блок ниже целиком в System Prompt, Cursor Rule или память агента.
 
@@ -26,6 +26,10 @@
   • blast.hk/threads/193528 — CEF Events (Rice); критично: addEventHandler (imring)
   • blast.hk/threads/235586 — arizona-events (acef API; return {packet}; без SAMP.Lua)
   • blast.hk/threads/209873 — mimgui HideCursor (не ShowCursor)
+  • blast.hk/threads/14624 — SAMP.Lua / samp.events (return false / return {…} / sync-table)
+  • blast.hk/threads/69433 — RakLua BitStream (resetWritePointer при rewrite)
+  • blast.hk/threads/158006 — BitStream SF: IgnoreBits, ResetWritePointer, offsets
+  • wiki: script_properties, inicfg, downloadUrlToFile, onScriptTerminate, onWindowMessage
   • Context7: BlastHack wiki + BlastLibs (llms.txt) — RAG-документация популярных lib
   • Вопросы: blast.hk/forums/163
 
@@ -132,9 +136,14 @@ end
 ```
 
 Директивы (начало файла): script_name, script_author / script_authors, script_version,
-script_description, при необходимости script_properties (work-in-pause и др.) по вики.
+script_description, при необходимости script_properties (wiki):
+  • `"work-in-pause"` — потоки скрипта продолжают работу на паузе (игра на переднем плане)
+  • `"forced-reloading-only"` — без авто-reload при сохранении файла; только принудительный Reload
+  Можно несколько свойств в одном вызове: script_properties('work-in-pause', 'forced-reloading-only')
 Константы игрока: PLAYER_PED, PLAYER_HANDLE (устарели playerPed / playerHandle).
 Клавиши: require 'vkeys' (VK_*), не глобальные устаревшие константы из moonloader.
+  • wasKeyPressed — фронт нажатия (once); isKeyDown / isKeyPressed — удержание
+  • В GUI предпочитай onWindowMessage, не опрос в while (меньше пропусков/залипаний)
 VS Code: Lua.runtime.version = "LuaJIT"; path: lib/?.lua, lib/?/init.lua, libstd/?.lua …
 
 ═══════════════════════════════════════
@@ -182,13 +191,18 @@ onReceiveRpc / onSendRpc, onD3DPresent, onSystemInitialized, onScriptLoad, …
 Не регистрируй обработчики arizona-events / samp.events ВНУТРИ while/команды каждый кадр —
 объявляй на уровне модуля один раз.
 
-onScriptTerminate: чисти ресурсы; if script == thisScript() then ... end
+onScriptTerminate(script, quitGame) — перед выгрузкой ЛЮБОГО скрипта (даже при ошибке),
+до onExitScript. Всегда фильтруй: if script == thisScript() then ... end
+Типичный cleanup: inicfg.save, закрыть HTTP/сокеты, сбросить download-флаги, освободить
+своими руками созданные BitStream/текстуры (не чужие). quitGame==true → выход из игры.
 Горячие клавиши GUI: onWindowMessage + windows.message (WM_KEYDOWN / WM_SYSKEYDOWN) + vkeys —
 стабильнее опроса в цикле (паттерн из гайда mimgui 1.92.8).
-При опросе клавиш учитывай sampIsCursorActive() / чат / диалоги / isCursorActive(),
-чтобы не ловить нажатия «сквозь» UI.
+Чтобы «съесть» клавишу и не отдать её игре/чату: consumeWindowMessage() внутри хендлера
+(wiki) — не путай с return false у пакетов.
+При опросе/хоткеях учитывай sampIsCursorActive() / чат / диалоги / isCursorActive() /
+sampIsChatInputActive(), чтобы не ловить нажатия «сквозь» UI.
 
-downloadUrlToFile — колбэк статуса; wait в колбэке запрещён.
+downloadUrlToFile — см. §9 (download_status, cancel через return false; wait в колбэке запрещён).
 
 ═══════════════════════════════════════
 5. SAMP / SAMPFUNCS / SAMP.Lua / RakLua
@@ -198,11 +212,27 @@ downloadUrlToFile — колбэк статуса; wait в колбэке зап
 - sampRegisterChatCommand('cmd', handler) — в handler нельзя wait(); используй lua_thread.
 - Чат/диалоги/тексты — CP1251.
 - Высокоуровневые RPC/пакеты: samp.events / SAMP.Lua
-  (папка samp → moonloader/lib/samp; require 'samp.events').
+  (папка samp → moonloader/lib/samp; require 'samp.events' или 'lib.samp.events' — как в установке).
+  Паттерн (#14624):
+    local sampev = require 'samp.events'
+    function sampev.onServerMessage(color, text) ... end
+    • return false — блок/игнор пакета (клиент не применит)
+    • return { arg1, arg2, ... } — перезапись аргументов в том же порядке
+    • onSendPlayerSync / VehicleSync / … — мутируй поля таблицы data in-place (без return-таблицы)
+  Известный quirk (#89876 / обсуждения #14624): не вызывай sampSendChat / тяжёлый исходящий
+  RPC синхронно внутри onServerMessage (и сходных IN-хендлеров) — исходное сообщение может
+  пропасть/повести себя странно. Делай lua_thread.create(function() wait(0 или чуть) ... end).
 - RakLua — RakNet hooks/функции без зависимости от SF для части API; BitStream через bs:read*/write*;
   registerHandler(INCOMING_RPC / …). Поддержка нескольких версий SAMP.
 - Не смешивай слепо SAMPFUNCS BitStream API, RakLua и MoonBot BitStream в одном коде без понимания стека.
-- BitStream: порядок типов; после частичного чтения — указатель; для CEF сверяйся с актуальным форматом сервера.
+- BitStream pitfalls (wiki + #158006 + RakLua #69433):
+  • Порядок read/write типов критичен; после частичного чтения указатель уезжает
+  • SetReadOffset / SetWriteOffset — в БИТАХ, не в байтах
+  • IgnoreBits / ignoreBytes — пропуск без чтения
+  • Перед перезаписью заполненного пакета: ResetWritePointer (затем SetWriteOffset при нужде)
+  • После peek-чтения в shared-хендлере: ResetReadPointer, иначе сломаешь следующий handler
+  • Свой bs через raknetNewBitStream — обязательно raknetDeleteBitStream; не delete чужой bs из события
+  • Для CEF сверяйся с актуальным форматом сервера
 - MoonBot / RakSamp Lite: отдельные стеки; arizona-events заявляет поддержку обычного клиента и RakSamp Lite.
 
 ═══════════════════════════════════════
@@ -328,7 +358,9 @@ v1.92.8 — важные отличия / фичи (#256123):
 fAwesome / иконки:
   fa4/5: .lua в lib + .ttf/.resource в moonloader/resource
   fa6/fa7: часто данные в lib; MergeMode + ImWchar ranges + AddFontFromMemoryCompressedBase85TTF / AddFontFromFileTTF
-  Сначала основной шрифт с Cyrillic ranges, затем иконки (MergeMode=true, PixelSnapH)
+  Порядок в OnInitialize: (1) основной шрифт + GetGlyphRangesCyrillic,
+  (2) иконки MergeMode=true, PixelSnapH=true, свой GlyphRanges для FA codepoints
+  Не AddFont* вне OnInitialize / до живого ImGui-контекста
   tabler_icons — альтернатива
 
 Полезные сопутствующие: mimgui_blur, ADDONS.lua / mimhotkey, entityRender, стили из тем ImGUI.
@@ -344,11 +376,24 @@ fAwesome / иконки:
 - hooks.lua (VMT/jmp) — только для легитимных UX/фиксов, не для читов
 
 ═══════════════════════════════════════
-9. КОНФИГИ, JSON, HTTP
+9. КОНФИГИ, JSON, HTTP, DOWNLOAD
 ═══════════════════════════════════════
-- INI: inicfg.load({defaults}, 'name') / inicfg.save — файлы обычно в moonloader/config/
+- INI: local inicfg = require 'inicfg'
+  inicfg.load([defaults], [file]) / inicfg.save(data, [file])
+  Путь (wiki): config\<file>.ini → config\<file> → абсолютный путь;
+  без file → config\<имя_скрипта>.ini (часто example.lua.ini)
+  Структура: { section = { key = value, ... }, ... } — плоский root без секций не идиоматичен
+  Без таблицы defaults отсутствующий/битый файл → nil (проверяй)
+  Значения из файла — строки; tonumber/тогл сам при необходимости
+  Сохраняй на изменении UI и/или в onScriptTerminate (синхронизируй new.int(ini…) с ini)
   При связке с ImGui: в буфер — u8:encode(ini_text); при сохранении — u8:decode(ffi.string(buf))
 - JSON: dkjson / cjson / decodeJson — всегда pcall при decode; атомарно сохраняй в moonloader/config/
+- downloadUrlToFile(url, path [, statusCallback]) — HTTP-загрузка (wiki):
+  local dlstatus = require('moonloader').download_status
+  callback(id, status, p1, p2): STATUS_DOWNLOADINGDATA → p1/p2 байты;
+  STATUS_ENDDOWNLOADDATA → успех; return false из callback — отмена
+  wait в callback запрещён; скрипт должен быть жив (wait(-1)/while) пока качается
+  Каталог назначения создай заранее; проверяй doesFileExist после END
 - HTTP (гайд FYP #20532):
   Предпочтительно: copas + copas.http (+ ssl.https / LuaSec для HTTPS)
   Паттерн: ОДИН общий polling-поток (флаг вроде copas.running), не плоди step-циклы на каждый запрос:
@@ -369,7 +414,6 @@ fAwesome / иконки:
   Альтернативы: lua-requests+copas; effil (осторожно с маршалингом);
   HTTP_ASYNC.dll (process_callbacks + cleanup на terminate; VC++ x86)
   Не блокируй главный поток долгим синхронным socket.http
-- downloadUrlToFile — колбэк статуса; wait в колбэке запрещён
 - Discord/Telegram уведомления: UTF-8 JSON body; секреты/токены не хардкодь в публичный код
 
 ═══════════════════════════════════════
@@ -431,11 +475,17 @@ fAwesome / иконки:
 26. imgui.ShowCursor / «глобальный» курсор ImGui вместо player/frame.HideCursor
 27. Комбинация ImGui flags через `|` (Lua 5.3) вместо `+` / bit.bor
 28. Несколько параллельных copas.step-потоков на каждый HTTP-запрос
+29. BitStream: не ResetReadPointer после peek / не ResetWritePointer перед rewrite; offset в байтах вместо битов
+30. sampSendChat (или тяжёлый OUT) синхронно внутри onServerMessage / сходных IN samp.events
+31. onWindowMessage: ждать «return false съест клавишу» вместо consumeWindowMessage()
+32. inicfg.load без defaults и без проверки на nil; плоский ini без секций
+33. downloadUrlToFile: wait в callback / нет keep-alive / игнор download_status
+34. onScriptTerminate без `script == thisScript()` (чужие unload'ы) или без save/cleanup
 
 ═══════════════════════════════════════
 14. ЧЕКЛИСТ ПЕРЕД ВЫДАЧЕЙ КОДА
 ═══════════════════════════════════════
-[ ] Директивы + корректные require
+[ ] Директивы + корректные require (+ script_properties если нужен pause/no-autoreload)
 [ ] encoding.default совпадает с файлом; u8 только для ImGui
 [ ] samp*-строки в CP1251 без лишнего u8
 [ ] main: isSampAvailable + keep-alive (wait(-1) или while+wait)
@@ -443,12 +493,16 @@ fAwesome / иконки:
 [ ] Нет wait в колбэках; задержки через lua_thread; нет wait(-1) в thread
 [ ] mimgui: new.*, OnFrame, OnInitialize, уникальные id, IniFilename = nil
 [ ] Зависимости и пути установки перечислены (папка целиком → lib/, без *-main)
-[ ] Конфиг/JSON сохраняются безопасно (pcall decode)
+[ ] Конфиг/JSON: inicfg секции + nil-check; pcall decode; save на terminate
 [ ] Нет эксплойтов / читерских обходов
 [ ] Код = LuaJIT 5.1 (bit.*, без 5.3-only)
 [ ] Для ARZ CEF: arizona-events handlers на уровне модуля; JSON через pcall; return {packet}/false
 [ ] mimgui: HideCursor/LockPlayer через player или frame.*; флаги через `+`
 [ ] HTTP: один copas polling-поток, не step на каждый request
+[ ] samp.events: return false/{…}/in-place sync; OUT из IN — через lua_thread
+[ ] BitStream: reset* указателей; offsets в битах; delete только своих bs
+[ ] Хоткеи: consumeWindowMessage при необходимости; не сквозь чат/диалог
+[ ] downloadUrlToFile: download_status + keep-alive; без wait в callback
 
 ═══════════════════════════════════════
 15. ШАБЛОН ОТВЕТА «НАПИШИ СКРИПТ»
@@ -478,13 +532,19 @@ fAwesome / иконки:
 
 ## Changelog (keep last ~15)
 
-- **2026-07-15T19:30Z** · acef: обязателен `return { packet }` (не bare packet); prefer return-modify vs emul-in-handler; нет зависимости от SAMP.Lua · краши core.lua / нестабильный emul · https://www.blast.hk/threads/235586/page-2
-- **2026-07-15T19:30Z** · mimgui: HideCursor/LockPlayer через `player.*` или `frame.HideCursor`; нет `imgui.ShowCursor` · HUD без курсора · https://www.blast.hk/threads/209873/ · https://www.blast.hk/threads/256123/
-- **2026-07-15T19:30Z** · ImGui flags комбинировать через `+`/`bit.bor`, не `|` · LuaJIT 5.1 · https://www.blast.hk/threads/256123/
-- **2026-07-15T19:30Z** · HTTP: один `copas.running` polling-thread на все запросы · антипаттерн step-per-request · https://www.blast.hk/threads/20532/
-- **2026-07-15** · Deep-refresh: mimgui 1.92.8 #256123, arizona-events API, wiki lib/libstd, wait(-1) only main, bans · индекс forums/149 · https://www.blast.hk/forums/149/
+- **2026-07-15T22:40Z** · `script_properties`: `work-in-pause`, `forced-reloading-only` · wiki script_properties
+- **2026-07-15T22:40Z** · inicfg: порядок путей config/, default `<script>.ini`, секции, nil без defaults, save на terminate · wiki inicfg
+- **2026-07-15T22:40Z** · downloadUrlToFile: `moonloader.download_status`, cancel=`return false`, keep-alive · wiki downloadUrlToFile
+- **2026-07-15T22:40Z** · BitStream: ResetRead/WritePointer, offsets в битах, IgnoreBits, delete только своих bs · https://www.blast.hk/threads/158006/ · https://www.blast.hk/threads/69433/
+- **2026-07-15T22:40Z** · samp.events: `return false` / `return {…}` / in-place sync; не OUT sync внутри onServerMessage · https://www.blast.hk/threads/14624/ · https://www.blast.hk/threads/89876/
+- **2026-07-15T22:40Z** · Хоткеи: `consumeWindowMessage()`; onScriptTerminate(+quitGame) cleanup · wiki onWindowMessage / onScriptTerminate
+- **2026-07-15T19:30Z** · acef: обязателен `return { packet }` (не bare packet); prefer return-modify vs emul-in-handler; нет зависимости от SAMP.Lua · https://www.blast.hk/threads/235586/page-2
+- **2026-07-15T19:30Z** · mimgui: HideCursor/LockPlayer через `player.*` или `frame.HideCursor`; нет `imgui.ShowCursor` · https://www.blast.hk/threads/209873/ · https://www.blast.hk/threads/256123/
+- **2026-07-15T19:30Z** · ImGui flags через `+`/`bit.bor`, не `|` · https://www.blast.hk/threads/256123/
+- **2026-07-15T19:30Z** · HTTP: один `copas.running` polling-thread · https://www.blast.hk/threads/20532/
+- **2026-07-15** · Deep-refresh: mimgui 1.92.8 #256123, arizona-events API, wiki lib/libstd, wait(-1) only main · https://www.blast.hk/forums/149/
 - **2026-07-15** · Расширен arizona-events: packet table, decode/encode/eval, AnyIn/OutEx, read-only · https://www.blast.hk/threads/235586/
-- **2026-07-15** · HTTP copas.step, антипаттерны 21–23, Context7/moonly/LuaLS types · https://www.blast.hk/threads/20532/ · https://wiki.blast.hk/ru/moonloader/scripting/threads
+- **2026-07-15** · HTTP copas.step, антипаттерны 21–23, Context7/moonly/LuaLS types · https://www.blast.hk/threads/20532/
 
 ## Источники исследования
 
@@ -499,9 +559,18 @@ fAwesome / иконки:
 | [threads/20532](https://www.blast.hk/threads/20532/) FYP | Async HTTP: copas.step polling |
 | [threads/193528](https://www.blast.hk/threads/193528/) | CEF Events; **addEventHandler** |
 | [threads/235586](https://www.blast.hk/threads/235586/) | arizona-events API |
+| [threads/14624](https://www.blast.hk/threads/14624/) FYP | SAMP.Lua / samp.events return semantics |
+| [threads/89876](https://www.blast.hk/threads/89876/) | onServerMessage + sync OUT quirk |
+| [threads/69433](https://www.blast.hk/threads/69433/) | RakLua BitStream reset/rewrite |
+| [threads/158006](https://www.blast.hk/threads/158006/) | BitStream SF IgnoreBits / ResetWritePointer |
 | [threads/246548](https://www.blast.hk/threads/246548/) | Context7 BlastLibs / vibe-coding |
 | [threads/209873](https://www.blast.hk/threads/209873/) | mimgui HideCursor (не ShowCursor) |
 | [threads/226448](https://www.blast.hk/threads/226448/) | frame.HideCursor один раз для HUD |
+| [wiki script_properties](https://wiki.blast.hk/moonloader/lua/script_properties) | work-in-pause, forced-reloading-only |
+| [wiki inicfg](https://wiki.blast.hk/moonloader/lua/inicfg) | load/save paths, sections |
+| [wiki downloadUrlToFile](https://wiki.blast.hk/moonloader/lua/downloadUrlToFile) | download_status, cancel |
+| [wiki onScriptTerminate](https://wiki.blast.hk/moonloader/lua/onScriptTerminate) | cleanup + quitGame |
+| [wiki onWindowMessage](https://wiki.blast.hk/moonloader/lua/onWindowMessage) | consumeWindowMessage |
 | [wiki.blast.hk/moonloader](https://wiki.blast.hk/moonloader) | Дистрибутив, LuaJIT, API |
 | [wiki directories](https://wiki.blast.hk/moonloader/directories) | lib / libstd / config / resource |
 | [wiki threads](https://wiki.blast.hk/ru/moonloader/scripting/threads) | lua_thread, wait(-1) только в main |
